@@ -17,6 +17,7 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
+import atexit
 import logging
 import os
 from sqlalchemy import create_engine
@@ -25,6 +26,7 @@ from sqlalchemy.pool import NullPool
 
 from airflow import configuration as conf
 from airflow.logging_config import configure_logging
+from airflow.utils.sqlalchemy import setup_event_handlers
 
 log = logging.getLogger(__name__)
 
@@ -122,6 +124,7 @@ def configure_vars():
 
 
 def configure_orm(disable_connection_pool=False):
+    log.debug("Setting up DB connection pool (PID %s)" % os.getpid())
     global engine
     global Session
     engine_args = {}
@@ -134,9 +137,23 @@ def configure_orm(disable_connection_pool=False):
                                                   'SQL_ALCHEMY_POOL_RECYCLE')
 
     engine = create_engine(SQL_ALCHEMY_CONN, **engine_args)
+    reconnect_timeout = conf.getint('core', 'SQL_ALCHEMY_RECONNECT_TIMEOUT')
+    setup_event_handlers(engine, reconnect_timeout)
     Session = scoped_session(
         sessionmaker(autocommit=False, autoflush=False, bind=engine))
 
+def dispose_orm():
+    """ Properly close pooled database connections """
+    log.debug("Disposing DB connection pool (PID %s)", os.getpid())
+    global engine
+    global Session
+
+    if Session:
+        Session.remove()
+        Session = None
+    if engine:
+        engine.dispose()
+        engine = None
 
 try:
     from airflow_local_settings import *
@@ -148,6 +165,9 @@ except:
 configure_logging()
 configure_vars()
 configure_orm()
+
+# Ensure we close DB connections at scheduler and gunicon worker terminations
+atexit.register(dispose_orm)
 
 # Const stuff
 
